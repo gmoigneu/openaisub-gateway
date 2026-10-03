@@ -70,7 +70,9 @@ func Open(dir string, key []byte) (*Store, error) {
 	s := &Store{db: db, aead: aead}
 	_, err = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
  CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, sealed BLOB NOT NULL);
+	CREATE TABLE IF NOT EXISTS credentials (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, sealed BLOB NOT NULL);
+	CREATE TABLE IF NOT EXISTS credential_imports (digest TEXT PRIMARY KEY);
+	INSERT OR IGNORE INTO credential_imports(digest) SELECT value FROM metadata WHERE key='last_import';
  CREATE TABLE IF NOT EXISTS client_keys (id TEXT PRIMARY KEY,name TEXT NOT NULL,prefix TEXT NOT NULL,digest BLOB UNIQUE NOT NULL,created_at TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);`)
 	if err != nil {
 		db.Close()
@@ -188,12 +190,12 @@ func (s *Store) ImportCredentials(ctx context.Context, c openaiauth.Credentials)
 		return err
 	}
 	defer tx.Rollback()
-	var previous string
-	err = tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='last_import'").Scan(&previous)
+	var processed string
+	err = tx.QueryRowContext(ctx, "SELECT digest FROM credential_imports WHERE digest=?", id).Scan(&processed)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if previous == id {
+	if processed == id {
 		return nil
 	}
 	nonce := make([]byte, s.aead.NonceSize())
@@ -217,7 +219,7 @@ func (s *Store) ImportCredentials(ctx context.Context, c openaiauth.Credentials)
 	if n != 1 {
 		return openaiauth.ErrConflict
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO metadata(key,value) VALUES('last_import',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", id); err != nil {
+	if _, err = tx.ExecContext(ctx, "INSERT INTO credential_imports(digest) VALUES(?)", id); err != nil {
 		return err
 	}
 	return tx.Commit()

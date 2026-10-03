@@ -144,4 +144,20 @@ func TestPendingRegistrationAndIdempotentImport(t *testing.T) {
 	if actual.AccessToken != rotated.AccessToken || actual.RefreshToken != rotated.RefreshToken {
 		t.Fatal("retry overwrote rotated tokens")
 	}
+	newLogin := actual
+	newLogin.AccessToken = "second-login-access"
+	newLogin.RefreshToken = "second-login-refresh"
+	newLogin.IDToken = "second-login-identity"
+	if err = s.ImportCredentials(ctx, newLogin); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := s.LoadCredentials(ctx)
+	original.Revision = current.Revision // The admin import route reads the current revision.
+	if err = s.ImportCredentials(ctx, original); err != nil {
+		t.Fatal("delayed old import retry", err)
+	}
+	actual, _ = s.LoadCredentials(ctx)
+	if actual.AccessToken != newLogin.AccessToken || actual.RefreshToken != newLogin.RefreshToken {
+		t.Fatal("delayed retry restored a spent session over a later login")
+	}
 }
