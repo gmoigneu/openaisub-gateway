@@ -37,7 +37,11 @@ func TestContainerComposeHostPort(t *testing.T) {
 	project := "gateway-host-" + strings.ToLower(rand.Text())
 	compose := func(host bool, port string, args ...string) []byte {
 		t.Helper()
-		flags := []string{"compose", "-p", project, "-f", filepath.Join(dir, "compose.yaml"), "-f", filepath.Join(dir, "test.yaml")}
+		flags := []string{"compose", "-p", project, "-f", filepath.Join(dir, "compose.yaml")}
+		// Inspect the shipped configuration unchanged; isolate ports only at runtime.
+		if args[0] != "config" {
+			flags = append(flags, "-f", filepath.Join(dir, "test.yaml"))
+		}
 		if host {
 			flags = append(flags, "-f", filepath.Join(dir, "compose.host.yaml"))
 		}
@@ -73,6 +77,13 @@ func TestContainerComposeHostPort(t *testing.T) {
 			if err := json.Unmarshal(compose(tc.host, tc.port, "config", "--format", "json"), &config); err != nil {
 				t.Fatal(err)
 			}
+			wantPorts := 1
+			if tc.host {
+				wantPorts++
+			}
+			if len(config.Services["gateway"].Ports) != wantPorts {
+				t.Fatal("unexpected published ports")
+			}
 			found := false
 			for _, binding := range config.Services["gateway"].Ports {
 				if binding.HostIP != "127.0.0.1" {
@@ -83,6 +94,8 @@ func TestContainerComposeHostPort(t *testing.T) {
 					if binding.Published != tc.want {
 						t.Fatal("unexpected inference host port")
 					}
+				} else if binding.Target != 8081 || binding.Published != "8081" {
+					t.Fatal("administrator port must remain unchanged")
 				}
 			}
 			if found != tc.host {
@@ -103,20 +116,25 @@ func TestContainerComposeHostPort(t *testing.T) {
 		t.Fatal("inference must be published only on loopback")
 	}
 	client := &http.Client{Timeout: time.Second}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		response, err := client.Get("http://" + address + "/healthz")
-		if err == nil {
-			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				break
+	waitReady := func(url string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			response, err := client.Get(url)
+			if err == nil {
+				response.Body.Close()
+				if response.StatusCode == http.StatusOK {
+					return
+				}
 			}
+			if time.Now().After(deadline) {
+				t.Fatal("published listener did not become ready")
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("published inference listener did not become ready")
-		}
-		time.Sleep(100 * time.Millisecond)
 	}
+	waitReady("http://" + address + "/healthz")
+	identity := string(compose(true, "0", "exec", "-T", "gateway", "/gateway", "auth", "identity"))
 	response, err := client.Get("http://" + address + "/v1/models")
 	if err != nil {
 		t.Fatal("cannot reach the published models endpoint")
@@ -126,6 +144,11 @@ func TestContainerComposeHostPort(t *testing.T) {
 		t.Fatal("host access must still require a client key")
 	}
 	compose(false, "", "up", "-d", "--no-build")
+	adminAddress := strings.TrimSpace(string(compose(false, "", "port", "gateway", "8081")))
+	waitReady("http://" + adminAddress + "/")
+	if string(compose(false, "", "exec", "-T", "gateway", "/gateway", "auth", "identity")) != identity {
+		t.Fatal("disabling host access must preserve gateway identity")
+	}
 	id := strings.TrimSpace(string(compose(false, "", "ps", "-q", "gateway")))
 	output, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{json .HostConfig.PortBindings}}", id).Output()
 	if err != nil {
