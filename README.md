@@ -7,7 +7,7 @@ A private Go gateway for one owner's Mastra agents. It exposes OpenAI Responses 
 ## Scope
 
 - One owner, one connected OpenAI account, one gateway process.
-- Private Docker network, separate localhost dashboard, persistent encrypted credentials.
+- Private Docker network, optional localhost API port for testing, separate localhost dashboard, persistent encrypted credentials.
 - Streaming and complete Responses, function tools, structured JSON, live model discovery.
 - No Chat Completions, embeddings, token accounting, request-content storage or billing fallback.
 
@@ -57,7 +57,45 @@ For a remote server, open an SSH tunnel on your own computer, then use the same 
 ssh -N -L 8081:127.0.0.1:8081 your-server
 ```
 
-The inference listener is available to sibling containers at `http://gateway:8080/v1`. It is not published on the host. Add your Mastra service to the same Compose project and network. The gateway needs outbound HTTPS access to OpenAI.
+The inference listener is available to sibling containers at `http://gateway:8080/v1`. It is not published on the host by default. Add your Mastra service to the same Compose project and network. The gateway needs outbound HTTPS access to OpenAI.
+
+### Optional host access for testing
+
+After setup, enable the host port with the supplied override:
+
+```fish
+docker compose -f compose.yaml -f compose.host.yaml up -d
+```
+
+Host clients can now use `http://127.0.0.1:8080/v1` with a gateway client key. For Mastra running on the host, use that URL as `baseURL`. Container clients still use `http://gateway:8080/v1`. The binding accepts connections only from the Docker host; the dashboard stays at `http://127.0.0.1:8081`.
+
+To use a different host port, set `GATEWAY_HOST_PORT` for the Compose command, or put it in the repository's `.env` file:
+
+```fish
+env GATEWAY_HOST_PORT=18080 docker compose -f compose.yaml -f compose.host.yaml up -d
+```
+
+The host URL is then `http://127.0.0.1:18080/v1`. The container port stays 8080. Keep the same file flags and port setting for later Compose updates while host access is enabled.
+
+Check that the default host port responds:
+
+```fish
+curl --fail http://127.0.0.1:8080/healthz
+```
+
+Health checks need no key. Models and Responses requests still require `Authorization: Bearer <gateway-client-key>`. For a remote Docker host, use an SSH tunnel to reach the published port from your computer:
+
+```fish
+ssh -N -L 8080:127.0.0.1:8080 your-server
+```
+
+Disable host access by applying only the base configuration. Compose recreates the gateway with its private API; saved credentials and client keys remain in the volume:
+
+```fish
+docker compose -f compose.yaml up -d
+```
+
+Changing port mappings recreates the container and can interrupt active requests.
 
 ## Connect OpenAI
 
@@ -126,7 +164,7 @@ The [executable Mastra example](examples/mastra/) pins `@mastra/core` 1.74.0, `@
 
 ## API and configuration
 
-Clients send `Authorization: Bearer <gateway-client-key>` to `http://gateway:8080`. Use a key created in the dashboard, not the administrator password or an OpenAI token.
+Clients send `Authorization: Bearer <gateway-client-key>` to `http://gateway:8080`, or to `http://127.0.0.1:8080` when host access is enabled. Use a key created in the dashboard, not the administrator password or an OpenAI token.
 
 - `GET /v1/models` returns the connected account's models in OpenAI-compatible `data[].id` format. Results are cached briefly; there is no bundled model list.
 - `POST /v1/responses` accepts complete or streaming inference requests. Set `stream:true` for server-sent events. Clients must send the full conversation history on each request.
@@ -141,6 +179,8 @@ The shipped Compose configuration sets these variables. Defaults work for the su
 - `GATEWAY_ENCRYPTION_KEY_FILE`: `/run/secrets/encryption_key`, the credential encryption key file.
 
 Keep the API private and preserve the separate admin listener when changing addresses. The administrator password cannot authenticate inference requests; client keys cannot access the dashboard.
+
+`GATEWAY_HOST_PORT` is a Compose setting for `compose.host.yaml`, not a gateway process variable. It defaults to 8080 and does not affect the internal API or administrator port.
 
 ## Verify with your subscription
 

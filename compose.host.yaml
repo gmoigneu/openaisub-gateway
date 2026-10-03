@@ -1,0 +1,5 @@
+# Opt in to inference from the host without opening access to the LAN.
+services:
+  gateway:
+    ports:
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-8080}:8080"

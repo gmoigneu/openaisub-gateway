@@ -1,4 +1,4 @@
-# Put agents on this network; port 8080 is never published on the host.
+# Put agents on this network; use compose.host.yaml for host testing.
 services:
   gateway:
     build: .
