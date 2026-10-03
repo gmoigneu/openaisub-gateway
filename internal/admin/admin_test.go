@@ -77,6 +77,24 @@ func TestLoginRequiresMatchingOrigin(t *testing.T) {
 	_, _ = signIn(t, h)
 }
 
+func TestAdminPagesPreserveSameOriginFormPosts(t *testing.T) {
+	h, _ := setupAdmin(t)
+	cookie, _ := signIn(t, h)
+	for _, tc := range []struct {
+		name   string
+		cookie *http.Cookie
+	}{{"login", nil}, {"dashboard", cookie}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := adminRequest(h, http.MethodGet, "/", "", "", tc.cookie)
+			// Fetch makes a non-CORS form POST's Origin null under no-referrer.
+			// same-origin preserves local form origins without cross-site referrers.
+			if w.Code != http.StatusOK || w.Header().Get("Referrer-Policy") != "same-origin" {
+				t.Fatalf("form page must preserve its origin: HTTP %d, Referrer-Policy %q", w.Code, w.Header().Get("Referrer-Policy"))
+			}
+		})
+	}
+}
+
 func TestLoginCookieProtectionAndExpiry(t *testing.T) {
 	h, _ := setupAdmin(t)
 	cookie, _ := signIn(t, h)

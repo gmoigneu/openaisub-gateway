@@ -118,6 +118,9 @@ func TestContainerOnboarding(t *testing.T) {
 			if err == nil {
 				response.Body.Close()
 				if response.StatusCode == http.StatusOK {
+					if response.Header.Get("Referrer-Policy") != "same-origin" {
+						t.Fatal("dashboard must preserve browser form origins")
+					}
 					return
 				}
 			}
