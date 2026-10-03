@@ -13,23 +13,40 @@ A private Go gateway for one owner's Mastra agents. It exposes OpenAI Responses 
 
 See the [canonical specification](docs/specs/v1.md) and [architecture decisions](docs/adr/).
 
+## How it works
+
+Mastra sends a gateway client key to the private API. The gateway checks that key, obtains a current OpenAI bearer token, and forwards the request to the official OpenAI API. OpenAI credentials stay in the gateway. Mastra supplies conversation history and executes tools.
+
+One Go process serves the API and dashboard on separate listeners. SQLite stores client key hashes and encrypted OpenAI credentials in a Docker volume. The encryption key is a separate Docker secret. The gateway discovers models from OpenAI and refreshes credentials when needed.
+
 ## Start with Docker Compose
 
-You need Docker with Compose. The command examples use the optional [RTK command proxy](https://github.com/rtk-ai/rtk); omit `rtk` if you do not use it.
+You need Docker with Compose. Clone the repository and run the setup commands from its root:
+
+```fish
+git clone https://github.com/gmoigneu/openaisub-gateway.git
+cd openaisub-gateway
+```
+
+During the implementation preview, the code is on `feat/1-subscription-gateway`. Check out that branch before building:
+
+```fish
+git switch feat/1-subscription-gateway
+```
 
 Build and initialize the two secret files. Initialization does not overwrite existing secrets. The initializer runs as root only to set file ownership for the container's unprivileged UID 10001.
 
 ```fish
-rtk docker compose build
-rtk mkdir -p secrets
-rtk docker run --rm --user 0 --volume "$PWD/secrets:/bootstrap" openaisub-gateway:local init --secrets-dir /bootstrap --owner 10001
-rtk docker compose up -d
+docker compose build
+mkdir -p secrets
+docker run --rm --user 0 --volume "$PWD/secrets:/bootstrap" openaisub-gateway:local init --secrets-dir /bootstrap --owner 10001
+docker compose up -d
 ```
 
 Open [the dashboard](http://127.0.0.1:8081). Read the administrator password from the running container and use it to log in:
 
 ```fish
-rtk docker compose exec gateway /gateway admin password
+docker compose exec gateway /gateway admin password
 ```
 
 Run this in a private terminal. The files remain readable only by their owner; do not make them world-readable to fix a permissions error.
@@ -37,7 +54,7 @@ Run this in a private terminal. The files remain readable only by their owner; d
 For a remote server, open an SSH tunnel on your own computer, then use the same dashboard URL:
 
 ```fish
-rtk ssh -N -L 8081:127.0.0.1:8081 your-server
+ssh -N -L 8081:127.0.0.1:8081 your-server
 ```
 
 The inference listener is available to sibling containers at `http://gateway:8080/v1`. It is not published on the host. Add your Mastra service to the same Compose project and network. The gateway needs outbound HTTPS access to OpenAI.
@@ -47,20 +64,22 @@ The inference listener is available to sibling containers at `http://gateway:808
 Run the login helper on the computer with your browser. Build the helper with Go 1.26.6 or newer:
 
 ```fish
-rtk go build -o gateway ./cmd/gateway
+go build -o gateway ./cmd/gateway
 ```
 
 For a local Docker stack, run the helper from the Compose directory:
 
 ```fish
-rtk proxy ./gateway auth login
+./gateway auth login
 ```
 
 For a remote stack, give the SSH destination and absolute Compose directory on that server:
 
 ```fish
-rtk proxy ./gateway auth login --ssh your-server --directory /absolute/path/to/openaisub-gateway
+./gateway auth login --ssh your-server --directory /absolute/path/to/openaisub-gateway
 ```
+
+For remote login, the SSH user must be able to run Docker Compose in that directory without an interactive privilege prompt. Build and run the helper on your own computer; the gateway must already be running on the server.
 
 The helper uses a local browser callback and imports credentials into the running container. Remote import uses SSH and standard input. No manual token copying is required. The gateway renews tokens automatically. Revoked or expired refresh credentials require another login.
 
@@ -103,7 +122,83 @@ The gateway wraps flat function definitions in the upstream `gateway` namespace.
 
 The example disables both Mastra retry paths. `modelSettings.maxRetries: 0` disables model-call retries; `errorProcessorDefaults: false` disables the separate default error processors, which otherwise retry transient failures. Choose retries explicitly in your own client. A replay can repeat model work or tool side effects.
 
-The [executable Mastra example](examples/mastra/) pins `@mastra/core` 1.74.0, `@ai-sdk/openai` 4.0.83 and Zod 4.6.5. It checks generation, streaming, a tool round trip and native JSON schema output. See its [instructions](examples/mastra/README.md) for live verification.
+The [executable Mastra example](examples/mastra/) pins `@mastra/core` 1.74.0, `@ai-sdk/openai` 4.0.83 and Zod 4.6.5. It checks generation, streaming, a tool round trip and native JSON schema output. Follow [live verification](#verify-with-your-subscription) below to run it against your account.
+
+## API and configuration
+
+Clients send `Authorization: Bearer <gateway-client-key>` to `http://gateway:8080`. Use a key created in the dashboard, not the administrator password or an OpenAI token.
+
+- `GET /v1/models` returns the connected account's models in OpenAI-compatible `data[].id` format. Results are cached briefly; there is no bundled model list.
+- `POST /v1/responses` accepts complete or streaming inference requests. Set `stream:true` for server-sent events. Clients must send the full conversation history on each request.
+- `GET /healthz` returns `ok` without authentication. It checks that the process responds, not that OpenAI is connected or available.
+
+The shipped Compose configuration sets these variables. Defaults work for the supplied container:
+
+- `GATEWAY_DATA_DIR`: `/data`, the persistent state directory.
+- `GATEWAY_API_ADDR`: `:8080`, the private inference listener.
+- `GATEWAY_ADMIN_ADDR`: `:8081`, the administrator listener, published only on host loopback.
+- `GATEWAY_ADMIN_SECRET_FILE`: `/run/secrets/admin_secret`, the administrator password file.
+- `GATEWAY_ENCRYPTION_KEY_FILE`: `/run/secrets/encryption_key`, the credential encryption key file.
+
+Keep the API private and preserve the separate admin listener when changing addresses. The administrator password cannot authenticate inference requests; client keys cannot access the dashboard.
+
+## Verify with your subscription
+
+Connect OpenAI and create a client key first. This check makes real inference requests and uses subscription capacity. Fixture tests alone do not establish account eligibility or preview availability.
+
+Run the check on the Docker host, from the repository root. Create a private environment file, then use your editor to fill in the values shown below. The `secrets/` directory is excluded from Git:
+
+```fish
+touch secrets/mastra.env
+chmod 600 secrets/mastra.env
+```
+
+```dotenv
+GATEWAY_API_KEY=replace-with-your-gateway-client-key
+GATEWAY_MODEL=replace-with-a-model-id
+```
+
+Save this optional service as `compose.check.yaml` beside `compose.yaml`. It joins the gateway's Compose network and uses Node.js 24. Node.js is not required on the host:
+
+```yaml
+services:
+  mastra-check:
+    image: node:24-bookworm-slim
+    working_dir: /work
+    volumes:
+      - ./examples/mastra:/work:ro
+      - mastra-check-deps:/work/node_modules
+    env_file:
+      - ./secrets/mastra.env
+    environment:
+      GATEWAY_BASE_URL: http://gateway:8080/v1
+    command: [sh, -c, "npm ci --ignore-scripts --no-audit --no-fund && npm run smoke"]
+
+volumes:
+  mastra-check-deps:
+```
+
+List the models available to your connected account, then replace `GATEWAY_MODEL` in `secrets/mastra.env` with one of the returned IDs:
+
+```fish
+docker compose -f compose.yaml -f compose.check.yaml run --rm mastra-check node --input-type=module -e '
+const response = await fetch(process.env.GATEWAY_BASE_URL + "/models", {
+  headers: { Authorization: "Bearer " + process.env.GATEWAY_API_KEY },
+});
+if (!response.ok) throw new Error("Models request failed: HTTP " + response.status);
+for (const model of (await response.json()).data) console.log(model.id);
+'
+```
+
+Run the live check:
+
+```fish
+docker compose -f compose.yaml -f compose.check.yaml run --rm mastra-check
+```
+
+Success prints `PASS generate`, `PASS stream`, `PASS tool round trip` and `PASS structured JSON`. The script does not print prompts, responses or credentials. Record the model, package versions and result before claiming deployment readiness. Leave `MASTRA_FIXTURE` unset for live checks.
+
+If a check fails, inspect the dashboard connection status and the last printed `PASS`. An invalid gateway key returns HTTP 401; replace or recreate that client key. A reconnect warning requires another `auth login`. Upstream quota or availability failures require waiting or choosing an available model; the gateway does not retry inference or switch billing methods.
 
 ## Persistence and recovery
 
@@ -120,10 +215,10 @@ Do not run multiple gateway processes against the same volume. Do not expose eit
 ## Develop and verify
 
 ```fish
-rtk npm --prefix examples/mastra ci --ignore-scripts --no-audit --no-fund
-rtk proxy env MASTRA_CONTRACT=1 go test -race ./...
-rtk go vet ./...
-rtk proxy gofmt -l .
+npm --prefix examples/mastra ci --ignore-scripts --no-audit --no-fund
+env MASTRA_CONTRACT=1 go test -race ./...
+go vet ./...
+gofmt -l .
 ```
 
 Formatting should report no files. CI runs the Go checks and real Mastra client against a controlled upstream fixture. It also runs the native container to check secret initialization, dashboard login, restart persistence and single-process ownership, then builds Linux amd64 and arm64 images without publishing them. Fixture-only cancellation and error cases verify client behavior without sending deliberately invalid live requests.
@@ -131,10 +226,10 @@ Formatting should report no files. CI runs the Go checks and real Mastra client 
 After building the image locally, run the same container check with Docker running:
 
 ```fish
-rtk proxy env DOCKER_CONTRACT=1 go test -v ./integration -run TestContainer
+env DOCKER_CONTRACT=1 go test -v ./integration -run TestContainer
 ```
 
-For a live check, run the smoke example from a container on the same Compose network with `GATEWAY_BASE_URL`, `GATEWAY_API_KEY` and `GATEWAY_MODEL` set. Live checks make inference requests against your subscription. Record the model, package versions and result without tokens or prompt content before claiming deployment readiness.
+The example needs Node.js 22.13 or newer when run outside Docker. See [live verification](#verify-with-your-subscription) for the Docker procedure and [fixture protocol](examples/mastra/README.md#fixture-protocol) for the controlled upstream checks.
 
 ## Upstream documentation
 

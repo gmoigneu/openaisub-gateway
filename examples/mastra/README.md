@@ -2,9 +2,11 @@
 
 Requires Node.js 22.13 or newer. Dependencies are pinned and the lockfile is committed.
 
+For setup, model discovery and a live check inside Docker, use the main [README](../../README.md#verify-with-your-subscription). To run directly, use these commands from `examples/mastra` after setting the environment variables below:
+
 ```fish
-rtk npm ci --ignore-scripts --no-audit --no-fund
-rtk npm run smoke
+npm ci --ignore-scripts --no-audit --no-fund
+npm run smoke
 ```
 
 Set these environment variables through your app's secret configuration before running:
