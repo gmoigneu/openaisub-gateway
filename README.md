@@ -64,6 +64,8 @@ rtk proxy ./gateway auth login --ssh your-server --directory /absolute/path/to/o
 
 The helper uses a local browser callback and imports credentials into the running container. Remote import uses SSH and standard input. No manual token copying is required. The gateway renews tokens automatically. Revoked or expired refresh credentials require another login.
 
+The issued registration is saved before token exchange, so a failed first attempt can reuse it. Transfer retries reuse the same credentials safely. If transfer still fails, the helper attempts to revoke the unused session and reports whether cleanup succeeded.
+
 Create a client key in the dashboard and copy it to your Mastra app's secret store. The full key is shown once. Its name and creation date remain visible, and revocation takes effect for subsequent requests.
 
 ## Configure Mastra
@@ -96,6 +98,8 @@ const result = await agent.generate('Hello', {
 ```
 
 Mastra owns conversation history and executes function tools. Do not supply `previousResponseId`, stored conversations, hosted tools or subscription-unsupported sampling limits. The gateway reports unsupported options rather than silently dropping them. It always sends upstream streaming requests, collecting the final response when a caller asks for a complete result. It does not retry inference automatically.
+
+The gateway wraps flat function definitions in the upstream `gateway` namespace. It adds that namespace to function calls in input history, removes it from returned calls, and flattens echoed tool definitions. Function names, arguments, results and call IDs stay unchanged. Caller-defined namespaces are rejected. Scalar text input becomes a user-message array; omitted storage becomes `store:false`.
 
 The example disables both Mastra retry paths. `modelSettings.maxRetries: 0` disables model-call retries; `errorProcessorDefaults: false` disables the separate default error processors, which otherwise retry transient failures. Choose retries explicitly in your own client. A replay can repeat model work or tool side effects.
 

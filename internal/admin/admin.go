@@ -249,8 +249,40 @@ func (h *Handler) internal(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage unavailable", 503)
 			return
 		}
+		if c.ClientID == "" {
+			c.ClientID, err = h.store.PendingRegistration(r.Context())
+			if err != nil {
+				http.Error(w, "storage unavailable", 503)
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"host_id": host, "client_id": c.ClientID, "subject": c.Subject})
+	case r.URL.Path == "/internal/registration" && r.Method == http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		var registration struct {
+			ClientID string `json:"client_id"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if dec.Decode(&registration) != nil || dec.Decode(new(any)) != io.EOF || registration.ClientID == "" || registration.ClientID == "dynamic_agent_client" || len(registration.ClientID) > 512 || strings.ContainsAny(registration.ClientID, " \t\r\n") {
+			http.Error(w, "invalid registration", 400)
+			return
+		}
+		old, err := h.store.LoadCredentials(r.Context())
+		if err != nil && !errors.Is(err, openaiauth.ErrNotConnected) {
+			http.Error(w, "storage unavailable", 503)
+			return
+		}
+		if old.ClientID != "" && old.ClientID != registration.ClientID {
+			http.Error(w, "registration cannot replace an active account", 409)
+			return
+		}
+		if err := h.store.Register(r.Context(), registration.ClientID); err != nil {
+			http.Error(w, "registration changed; restart sign-in", 409)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	case r.URL.Path == "/internal/import" && r.Method == http.MethodPost:
 		r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 		var c openaiauth.Credentials
@@ -288,12 +320,21 @@ func (h *Handler) internal(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "this gateway is bound to another registration", 409)
 			return
 		}
+		pending, err := h.store.PendingRegistration(r.Context())
+		if err != nil {
+			http.Error(w, "storage unavailable", 503)
+			return
+		}
+		if pending != "" && pending != c.ClientID {
+			http.Error(w, "credentials do not match the pending registration", 409)
+			return
+		}
 		if err = openaiauth.ValidateCredentials(r.Context(), c); err != nil {
 			http.Error(w, "OpenAI credential validation failed", 400)
 			return
 		}
 		c.Revision = old.Revision
-		if err = h.store.SaveCredentials(r.Context(), c); err != nil {
+		if err = h.store.ImportCredentials(r.Context(), c); err != nil {
 			http.Error(w, "credential state changed; retry import", 409)
 			return
 		}

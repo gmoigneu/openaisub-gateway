@@ -24,6 +24,7 @@ type LoginOptions struct {
 	Email           string
 	ListenAddress   string
 	OnAuthorization func(string)
+	OnRegistration  func(string) error
 }
 
 func Login(ctx context.Context, options LoginOptions) (Credentials, error) {
@@ -43,8 +44,8 @@ func login(ctx context.Context, o LoginOptions, client *http.Client, e endpoints
 	if o.ClientID == "dynamic_agent_client" {
 		return Credentials{}, errors.New("registration must use an issued client ID")
 	}
-	if (o.ClientID == "") != (o.Subject == "") {
-		return Credentials{}, errors.New("returning registration requires both client ID and account identity")
+	if o.ClientID == "" && o.Subject != "" {
+		return Credentials{}, errors.New("returning account identity requires its issued client ID")
 	}
 	if o.ListenAddress == "" {
 		o.ListenAddress = "127.0.0.1:1455"
@@ -166,6 +167,12 @@ func finishLogin(ctx context.Context, client *http.Client, e endpoints, o LoginO
 	}
 	if issued == "" || issued == "dynamic_agent_client" {
 		return Credentials{}, errors.New("OpenAI did not issue a client registration")
+	}
+	// Keep the issued registration even if code exchange requires a fresh attempt.
+	if o.ClientID == "" && o.OnRegistration != nil {
+		if err := o.OnRegistration(issued); err != nil {
+			return Credentials{}, errors.New("cannot retain OpenAI client registration")
+		}
 	}
 	t, err := exchange(ctx, client, e.token, url.Values{"grant_type": {"authorization_code"}, "client_id": {issued}, "code": {q.Get("code")}, "code_verifier": {verifier}, "redirect_uri": {redirect}, "resource": {Resource}})
 	if err != nil {

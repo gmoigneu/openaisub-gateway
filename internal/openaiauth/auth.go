@@ -83,6 +83,9 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	// Read again under the lock so waiting requests see a rotated token.
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	c, err := m.store.LoadCredentials(ctx)
 	if err != nil {
 		return "", err
@@ -99,7 +102,13 @@ func (m *Manager) AccessToken(ctx context.Context) (string, error) {
 	if c.RefreshToken == "" || c.ClientID == "" || c.ClientID == "dynamic_agent_client" {
 		return "", ErrReconnect
 	}
-	updated, err := m.refresh(ctx, c)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	// The issuer may consume a rotating token before the caller disconnects.
+	refreshCtx, stopRefresh := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	updated, err := m.refresh(refreshCtx, c)
+	stopRefresh()
 	if err != nil {
 		if errors.Is(err, ErrReconnect) {
 			persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

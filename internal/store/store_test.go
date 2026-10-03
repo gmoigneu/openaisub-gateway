@@ -103,3 +103,45 @@ func TestKeysAndWrongEncryptionKey(t *testing.T) {
 		t.Fatal("wrong encryption key accepted")
 	}
 }
+
+func TestPendingRegistrationAndIdempotentImport(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{9}, 32)
+	s, err := Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Register(ctx, "oaiapp_pending"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Register(ctx, "oaiapp_other"); !errors.Is(err, openaiauth.ErrConflict) {
+		t.Fatal("registration changed")
+	}
+	s.Close()
+	s, err = Open(dir, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if id, err := s.PendingRegistration(ctx); err != nil || id != "oaiapp_pending" {
+		t.Fatal("pending registration did not survive restart")
+	}
+	original := openaiauth.Credentials{ClientID: "oaiapp_pending", AccessToken: "first-access", RefreshToken: "first-refresh", IDToken: "first-identity"}
+	if err = s.ImportCredentials(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	rotated, _ := s.LoadCredentials(ctx)
+	rotated.AccessToken = "rotated-access"
+	rotated.RefreshToken = "rotated-refresh"
+	if err = s.SaveCredentials(ctx, rotated); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ImportCredentials(ctx, original); err != nil {
+		t.Fatal("duplicate import failed", err)
+	}
+	actual, _ := s.LoadCredentials(ctx)
+	if actual.AccessToken != rotated.AccessToken || actual.RefreshToken != rotated.RefreshToken {
+		t.Fatal("retry overwrote rotated tokens")
+	}
+}

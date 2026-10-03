@@ -98,6 +98,30 @@ func (s *Store) HostID(ctx context.Context) (string, error) {
 	err := s.db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='host_id'").Scan(&id)
 	return id, err
 }
+
+// PendingRegistration survives a failed first token exchange without saving unverified identity.
+func (s *Store) PendingRegistration(ctx context.Context) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='pending_client_id'").Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
+func (s *Store) Register(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO metadata(key,value) VALUES('pending_client_id',?)", id); err != nil {
+		return err
+	}
+	saved, err := s.PendingRegistration(ctx)
+	if err != nil {
+		return err
+	}
+	if saved != id {
+		return openaiauth.ErrConflict
+	}
+	return nil
+}
 func (s *Store) LoadCredentials(ctx context.Context) (openaiauth.Credentials, error) {
 	var c openaiauth.Credentials
 	var sealed []byte
@@ -149,6 +173,54 @@ func (s *Store) SaveCredentials(ctx context.Context, c openaiauth.Credentials) e
 		return openaiauth.ErrConflict
 	}
 	return nil
+}
+
+// ImportCredentials makes helper retries idempotent even after the server rotates the token.
+func (s *Store) ImportCredentials(ctx context.Context, c openaiauth.Credentials) error {
+	plain, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(plain)
+	id := hex.EncodeToString(digest[:])
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previous string
+	err = tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='last_import'").Scan(&previous)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if previous == id {
+		return nil
+	}
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err = rand.Read(nonce); err != nil {
+		return err
+	}
+	sealed := s.aead.Seal(nonce, nonce, plain, []byte("credentials:v1"))
+	var result sql.Result
+	if c.Revision == 0 {
+		result, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO credentials(id,revision,sealed) VALUES(1,1,?)", sealed)
+	} else {
+		result, err = tx.ExecContext(ctx, "UPDATE credentials SET revision=revision+1,sealed=? WHERE id=1 AND revision=?", sealed, c.Revision)
+	}
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return openaiauth.ErrConflict
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO metadata(key,value) VALUES('last_import',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (s *Store) ClearCredentials(ctx context.Context, revision int64) error {
 	c, err := s.LoadCredentials(ctx)

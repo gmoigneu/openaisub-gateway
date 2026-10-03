@@ -266,3 +266,31 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 		t.Fatal("logged out session still authorized")
 	}
 }
+
+func TestPendingRegistrationDoesNotAuthenticateAccount(t *testing.T) {
+	h, s := setupAdmin(t)
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, "http://gateway.test"+path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+testSecret)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	if w := call("POST", "/internal/registration", `{"client_id":"oaiapp_pending"}`); w.Code != 204 {
+		t.Fatalf("register: %d", w.Code)
+	}
+	if w := call("POST", "/internal/registration", `{"client_id":"oaiapp_pending"}`); w.Code != 204 {
+		t.Fatalf("retry: %d", w.Code)
+	}
+	if w := call("POST", "/internal/registration", `{"client_id":"oaiapp_other"}`); w.Code != 409 {
+		t.Fatal("registration overwritten")
+	}
+	w := call("GET", "/internal/identity", "")
+	var identity map[string]string
+	if json.Unmarshal(w.Body.Bytes(), &identity) != nil || identity["client_id"] != "oaiapp_pending" || identity["subject"] != "" {
+		t.Fatal("pending identity was lost or treated as validated")
+	}
+	if _, err := s.LoadCredentials(context.Background()); !errors.Is(err, openaiauth.ErrNotConnected) {
+		t.Fatal("registration created credentials")
+	}
+}

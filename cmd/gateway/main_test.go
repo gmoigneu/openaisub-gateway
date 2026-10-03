@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -16,6 +17,30 @@ import (
 	"github.com/gmoigneu/openaisub-gateway/internal/inference"
 	"github.com/gmoigneu/openaisub-gateway/internal/store"
 )
+
+func TestImportRetryPreservesPayloadAndHonorsCancellation(t *testing.T) {
+	payload := []byte(`{"fixture":"credentials"}`)
+	attempts := 0
+	err := importWithRetry(context.Background(), payload, func(action string, body []byte) ([]byte, error) {
+		attempts++
+		if action != "import" || !bytes.Equal(body, payload) {
+			t.Fatal("transfer changed payload")
+		}
+		if attempts == 1 {
+			return nil, errors.New("temporary SSH failure")
+		}
+		return nil, nil
+	})
+	if err != nil || attempts != 2 {
+		t.Fatalf("retry failed: attempts=%d err=%v", attempts, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = importWithRetry(ctx, payload, func(string, []byte) ([]byte, error) { t.Fatal("canceled transfer started"); return nil, nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation: %v", err)
+	}
+}
 
 func TestInitCreatesPrivateSecretsAndPreservesExistingValues(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "secrets")

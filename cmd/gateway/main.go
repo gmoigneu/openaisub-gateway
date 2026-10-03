@@ -189,7 +189,8 @@ func serve() error {
 	case err = <-failures:
 		stop()
 	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// A started refresh may need 20 seconds plus 5 seconds to persist rotation.
+	shutdown, cancel := context.WithTimeout(context.Background(), 28*time.Second)
 	defer cancel()
 	_ = api.Shutdown(shutdown)
 	_ = owner.Shutdown(shutdown)
@@ -235,12 +236,16 @@ func authCommand(args []string) error {
 		}
 		_, err = os.Stdout.Write(b)
 		return err
-	case "import":
+	case "import", "register":
 		b, err := io.ReadAll(io.LimitReader(os.Stdin, (128<<10)+1))
 		if err != nil || len(b) > 128<<10 {
 			return errors.New("credential input too large or unreadable")
 		}
-		_, err = localAdmin("POST", "/internal/import", b)
+		path := "/internal/import"
+		if args[0] == "register" {
+			path = "/internal/registration"
+		}
+		_, err = localAdmin("POST", path, b)
 		return err
 	}
 	return errors.New("unknown auth command")
@@ -321,7 +326,13 @@ func loginCommand(args []string) error {
 	if err = json.Unmarshal(b, &identity); err != nil || identity.HostID == "" {
 		return errors.New("invalid gateway identity")
 	}
-	credentials, err := openaiauth.Login(ctx, openaiauth.LoginOptions{HostID: identity.HostID, ClientID: identity.ClientID, Subject: identity.Subject, OnAuthorization: func(url string) {
+	credentials, err := openaiauth.Login(ctx, openaiauth.LoginOptions{HostID: identity.HostID, ClientID: identity.ClientID, Subject: identity.Subject, OnRegistration: func(id string) error {
+		registration, _ := json.Marshal(map[string]string{"client_id": id})
+		if _, err := transfer("register", registration); err != nil {
+			return errors.New("could not retain the issued OpenAI registration in the gateway")
+		}
+		return nil
+	}, OnAuthorization: func(url string) {
 		fmt.Fprintln(os.Stderr, "Continue with ChatGPT in your browser:", url)
 		var cmd *exec.Cmd
 		if runtime.GOOS == "darwin" {
@@ -340,10 +351,35 @@ func loginCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err = transfer("import", b); err != nil {
-		return errors.New("could not save login to gateway; run sign-in again")
+	if err = importWithRetry(ctx, b, transfer); err != nil {
+		cleanup, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if openaiauth.RevokeCredentials(cleanup, credentials) != nil {
+			return errors.New("login transfer failed and remote revocation was not confirmed; disconnect the app in ChatGPT Settings before signing in again")
+		}
+		return errors.New("login transfer failed; its renewable session was revoked, and the registration is saved for another sign-in")
 	}
 	fmt.Println("OpenAI connected. The gateway will renew this session.")
 	return nil
+}
+
+func importWithRetry(ctx context.Context, payload []byte, transfer func(string, []byte) ([]byte, error)) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, err = transfer("import", payload); err == nil {
+			return nil
+		}
+		if attempt < 2 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt+1) * time.Second):
+			}
+		}
+	}
+	return err
 }
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }

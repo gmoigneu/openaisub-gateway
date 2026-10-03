@@ -71,30 +71,44 @@ func TestContainerOnboarding(t *testing.T) {
 	args = append(args, image)
 	mustDocker("start gateway", args...)
 
-	var inspected []struct {
-		Config          struct{ User string }
-		HostConfig      struct{ ReadonlyRootfs bool }
+	type containerState struct {
+		Config     struct{ User string }
+		HostConfig struct{ ReadonlyRootfs bool }
+		State      struct {
+			Running  bool
+			ExitCode int
+			Error    string
+		}
 		NetworkSettings struct {
 			Ports map[string][]struct{ HostIp, HostPort string }
 		}
 	}
-	if err := json.Unmarshal(mustDocker("inspect container", "inspect", name), &inspected); err != nil || len(inspected) != 1 {
-		t.Fatal("cannot inspect running container")
-	}
-	state := inspected[0]
-	if state.Config.User != "10001:10001" || !state.HostConfig.ReadonlyRootfs {
-		t.Fatal("container must use UID 10001 and a read-only root filesystem")
-	}
-	bindings := state.NetworkSettings.Ports["8081/tcp"]
-	if len(bindings) != 1 || bindings[0].HostIp != "127.0.0.1" || bindings[0].HostPort == "" {
-		t.Fatal("administration must bind only to host loopback")
-	}
-	for port, bound := range state.NetworkSettings.Ports {
-		if port != "8081/tcp" && len(bound) != 0 {
-			t.Fatal("only administration may publish a host port")
+	inspect := func() containerState {
+		t.Helper()
+		var inspected []containerState
+		if err := json.Unmarshal(mustDocker("inspect container", "inspect", name), &inspected); err != nil || len(inspected) != 1 {
+			t.Fatal("cannot inspect running container")
 		}
+		return inspected[0]
 	}
-	base := "http://127.0.0.1:" + bindings[0].HostPort
+	adminBase := func() string {
+		t.Helper()
+		state := inspect()
+		if state.Config.User != "10001:10001" || !state.HostConfig.ReadonlyRootfs {
+			t.Fatal("container must use UID 10001 and a read-only root filesystem")
+		}
+		bindings := state.NetworkSettings.Ports["8081/tcp"]
+		if len(bindings) != 1 || bindings[0].HostIp != "127.0.0.1" || bindings[0].HostPort == "" {
+			t.Fatal("administration must bind only to host loopback")
+		}
+		for port, bound := range state.NetworkSettings.Ports {
+			if port != "8081/tcp" && len(bound) != 0 {
+				t.Fatal("only administration may publish a host port")
+			}
+		}
+		return "http://127.0.0.1:" + bindings[0].HostPort
+	}
+	base := adminBase()
 	client := &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	waitReady := func() {
 		t.Helper()
@@ -109,7 +123,8 @@ func TestContainerOnboarding(t *testing.T) {
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		t.Fatal("container dashboard did not become ready")
+		state := inspect()
+		t.Fatalf("container dashboard did not become ready: running=%t exit=%d runtime_error=%t ports=%v", state.State.Running, state.State.ExitCode, state.State.Error != "", state.NetworkSettings.Ports)
 	}
 	waitReady()
 	password := strings.TrimSpace(string(mustDocker("read administrator password", "exec", name, "/gateway", "admin", "password")))
@@ -166,6 +181,8 @@ func TestContainerOnboarding(t *testing.T) {
 		t.Fatal("a second server must reject the active data volume promptly")
 	}
 	mustDocker("restart gateway", "restart", "--time", "5", name)
+	// Docker may assign a different ephemeral host port when restarting.
+	base = adminBase()
 	waitReady()
 	if identity() != before {
 		t.Fatal("host identity changed after container restart")

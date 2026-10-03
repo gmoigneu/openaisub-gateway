@@ -133,6 +133,15 @@ func ValidateCredentials(ctx context.Context, c Credentials) error {
 	return nil
 }
 
+// RevokeCredentials ends an abandoned login when its tokens could not be transferred.
+func RevokeCredentials(ctx context.Context, c Credentials) error {
+	if c.ClientID == "" || c.ClientID == "dynamic_agent_client" || c.RefreshToken == "" {
+		return errors.New("issued client ID and refresh token are required for revocation")
+	}
+	m := &Manager{client: safeClient(nil), endpoints: officialEndpoints()}
+	return m.revoke(ctx, c)
+}
+
 func (m *Manager) Disconnect(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

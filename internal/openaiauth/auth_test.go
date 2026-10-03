@@ -151,6 +151,8 @@ type loginFixture struct {
 	sub, nonceOverride, audience string
 	scope                        string
 	expired                      bool
+	tokenError                   string
+	beforeExchange               func()
 	tokenCalls                   atomic.Int32
 }
 
@@ -171,10 +173,18 @@ func newLoginFixture(t *testing.T) *loginFixture {
 			json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "test-key", Algorithm: "RS256", Use: "sig"}}})
 		case "/token":
 			f.tokenCalls.Add(1)
+			if f.beforeExchange != nil {
+				f.beforeExchange()
+			}
 			r.ParseForm()
 			digest := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
 			if base64.RawURLEncoding.EncodeToString(digest[:]) != f.challenge || r.Form.Get("redirect_uri") != f.redirect || r.Form.Get("client_id") != "issued" || r.Form.Get("resource") != Resource {
 				t.Error("PKCE, redirect, client or resource mismatch")
+			}
+			if f.tokenError != "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(tokenResponse{Error: f.tokenError})
+				return
 			}
 			nonce := f.nonce
 			if f.nonceOverride != "" {
@@ -386,6 +396,51 @@ func TestReturningLoginRetainsRegistration(t *testing.T) {
 	}
 }
 
+func TestInitialRegistrationSurvivesFailedCodeExchange(t *testing.T) {
+	f := newLoginFixture(t)
+	f.tokenError = "invalid_grant"
+	var retained atomic.Bool
+	f.beforeExchange = func() {
+		if !retained.Load() {
+			t.Error("code exchanged before registration was retained")
+		}
+	}
+	var issued string
+	o := LoginOptions{HostID: "host", ListenAddress: "127.0.0.1:0", OnAuthorization: f.callback(t, nil), OnRegistration: func(clientID string) error {
+		issued = clientID
+		retained.Store(true)
+		return nil
+	}}
+	if _, err := login(context.Background(), o, safeClient(f.server.Client()), f.endpoints()); !errors.Is(err, ErrReconnect) {
+		t.Fatalf("expected failed code exchange: %v", err)
+	}
+	if issued != "issued" || f.tokenCalls.Load() != 1 {
+		t.Fatal("initial registration was lost")
+	}
+	f.tokenError = ""
+	o.ClientID = issued
+	o.OnRegistration = func(string) error { t.Error("pending registration was replaced"); return nil }
+	o.OnAuthorization = func(raw string) {
+		u, _ := url.Parse(raw)
+		if u.Query().Get("client_id") != "issued" || u.Query().Get("agent_name_hint") != "" {
+			t.Error("retry started another dynamic registration")
+		}
+		f.callback(t, func(v url.Values) { v.Del("client_id") })(raw)
+	}
+	c, err := login(context.Background(), o, safeClient(f.server.Client()), f.endpoints())
+	if err != nil || c.ClientID != "issued" || c.Subject != "owner" {
+		t.Fatalf("pending registration did not finish identity validation: %v", err)
+	}
+}
+
+func TestRegistrationPersistenceFailureStopsCodeExchange(t *testing.T) {
+	f := newLoginFixture(t)
+	_, err := login(context.Background(), LoginOptions{HostID: "host", ListenAddress: "127.0.0.1:0", OnAuthorization: f.callback(t, nil), OnRegistration: func(string) error { return errors.New("storage unavailable") }}, safeClient(f.server.Client()), f.endpoints())
+	if err == nil || f.tokenCalls.Load() != 0 {
+		t.Fatal("code exchanged after registration persistence failed")
+	}
+}
+
 func TestLoginCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	_, err := Login(ctx, LoginOptions{HostID: "host", ListenAddress: "127.0.0.1:0", OnAuthorization: func(string) { cancel() }})
@@ -455,6 +510,59 @@ func TestRotatedTokensSurviveRequestCancellation(t *testing.T) {
 	}
 }
 
+func TestRefreshExchangeSurvivesCallerCancellation(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	upstreamCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(received)
+		select {
+		case <-r.Context().Done():
+			close(upstreamCanceled)
+			<-release
+		case <-release:
+		}
+		json.NewEncoder(w).Encode(tokenResponse{AccessToken: "new-access", RefreshToken: "new-refresh", TokenType: "Bearer", ExpiresIn: 3600})
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := &cancelAwareStore{memoryStore: &memoryStore{c: expiredCredentials()}}
+	m := NewManager(store, server.Client())
+	m.endpoints.token = server.URL
+	result := make(chan error, 1)
+	go func() { _, err := m.AccessToken(ctx); result <- err }()
+	<-received
+	// The issuer has consumed the old token before the caller goes away.
+	cancel()
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatalf("refresh abandoned its replacement: %v", err)
+	}
+	if store.c.RefreshToken != "new-refresh" || store.saves != 1 {
+		t.Fatal("replacement refresh token was lost")
+	}
+}
+
+func TestCanceledCallerDoesNotStartRefresh(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: authRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("unexpected request")
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store := &memoryStore{c: expiredCredentials()}
+	_, err := NewManager(store, client).AccessToken(ctx)
+	if !errors.Is(err, context.Canceled) || calls.Load() != 0 || store.saves != 0 {
+		t.Fatalf("canceled caller started refresh: calls=%d error=%v", calls.Load(), err)
+	}
+}
+
 type authRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f authRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -481,5 +589,14 @@ func TestDisconnectClearsLocallyAfterRevocationDeadline(t *testing.T) {
 	}
 	if store.c.AccessToken != "" || store.c.RefreshToken != "" || store.clears != 1 || store.c.ClientID != "issued" {
 		t.Fatal("disconnect did not clear local tokens and preserve registration")
+	}
+}
+
+func TestRevokeCredentialsRejectsMissingRegistration(t *testing.T) {
+	for _, c := range []Credentials{{}, {ClientID: "issued"}, {RefreshToken: "private-refresh"}, {ClientID: "dynamic_agent_client", RefreshToken: "private-refresh"}} {
+		err := RevokeCredentials(context.Background(), c)
+		if err == nil || strings.Contains(err.Error(), "private-refresh") {
+			t.Fatalf("invalid revocation did not fail safely: %v", err)
+		}
 	}
 }
