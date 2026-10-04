@@ -68,6 +68,14 @@ GATEWAY_ADMIN_PORT=8081
 
 These variables select the image, paths, network and host admin port. They contain no passwords or client keys. Secret paths must exist on the target Docker host. Both secret files are mounted separately and read-only; the stack rejects missing source files.
 
+### Optional paid embeddings and voice
+
+To add embeddings, transcription and speech, create `openai_api_key` in the host's `GATEWAY_SECRETS_DIR` with mode `0600` and ownership readable by container UID `10001`. This is a separately billed OpenAI Platform API key. Do not paste its value into Portainer environment variables. Copy the `gateway.environment` and `gateway.volumes` additions from [compose.portainer.paid.yaml](../compose.portainer.paid.yaml) into the stack before deployment. The bind mount is read-only and rejects a missing source file. Restart the stack after replacing the key.
+
+Without this optional mount, valid gateway keys receive `503` on paid endpoints; subscription Models and Responses still work. **Every valid gateway client key can incur paid usage** once the key is mounted. Use OpenAI project limits and revoke client keys you no longer trust. The gateway has no per-key quotas or billing fallback.
+
+The paid routes allow **8 MiB** JSON, **26 MiB** multipart uploads including form overhead, and **64 MiB** successful responses. Upstream error bodies are limited to **1 MiB**. Uploads have a **30-second** read deadline. Oversized requests return `413`; known oversized responses return `502`. A stream that exceeds the limit or is interrupted aborts and must be treated as failed.
+
 If Caddy runs directly on the host, make the changes described in step 4 before deployment. Otherwise, select **Deploy the stack**. Keep any option to force an image pull disabled because the preview image exists only on this Docker host. If Portainer reports an unavailable image, verify that the image was built in this environment.
 
 The stack starts one container with automatic restart, a read-only root filesystem, dropped capabilities, a persistent data volume, and the dashboard bound to `127.0.0.1:8081` on the host. No OpenAI connection or client key exists yet.
@@ -78,7 +86,7 @@ For Caddy in Docker, add this site to its existing Caddyfile and replace the dom
 
 ```caddyfile
 gateway.example.com {
-    @inference path /v1/models /v1/responses
+    @inference path /v1/models /v1/responses /v1/embeddings /v1/audio/transcriptions /v1/audio/speech
     handle @inference {
         reverse_proxy openaisub-gateway:8080
     }
@@ -166,11 +174,14 @@ From outside the Docker host, run these checks with your domain:
 rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' https://gateway.example.com/v1/models
 rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer invalid' https://gateway.example.com/v1/models
 rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://gateway.example.com/v1/responses
+rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://gateway.example.com/v1/embeddings
+rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://gateway.example.com/v1/audio/transcriptions
+rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://gateway.example.com/v1/audio/speech
 rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' https://gateway.example.com/healthz
 rtk proxy curl -sS -o /dev/null -w '%{http_code}\n' https://gateway.example.com/admin
 ```
 
-Expect `401`, `401`, `401`, `404`, and `404`, in that order. Stop and correct the routing if health or admin paths succeed publicly. An unreachable domain or TLS failure must be fixed in DNS or your existing proxy before continuing.
+Expect `401` for the first six requests and `404` for the last two. Stop and correct the routing if health or admin paths succeed publicly. An unreachable domain or TLS failure must be fixed in DNS or your existing proxy before continuing.
 
 Use this fish command to check authenticated models. It prompts for a key without saving it in shell history or placing it in curl's arguments; only the HTTP status is printed:
 
@@ -196,9 +207,11 @@ Use the [Mastra configuration](../README.md#configure-mastra), setting the provi
 
 Before relying on the deployment, run the [Mastra smoke example](../examples/mastra/README.md) against the public URL with your key and an available model. Verify generation, streaming, a tool round trip and structured JSON. These checks use real subscription capacity. Record the model, package versions and outcome without prompts or credentials.
 
+If paid endpoints are enabled, run the [paid provider check](../examples/mastra/README.md#paid-provider-check) against the public URL. It makes an embedding, generates a short speech sample and transcribes that sample. These are billed Platform API calls. Record the three model IDs and results without credentials or content.
+
 ## Updates, backups and recovery
 
-Keep `GATEWAY_DATA_VOLUME`, `GATEWAY_SECRETS_DIR`, and both secret files stable across updates. Never delete the data volume as part of a normal redeployment.
+Keep `GATEWAY_DATA_VOLUME`, `GATEWAY_SECRETS_DIR`, and the secret files stable across updates. Never delete the data volume as part of a normal redeployment.
 
 For an update, build the reviewed revision on the same Docker host with a new image tag. Set `GATEWAY_IMAGE` to that tag in Portainer and update the stack without forcing a pull. A new tag makes the selected image explicit and retains the previous image for rollback. Restarting or recreating the container can interrupt active requests. Repeat the access checks after an update.
 

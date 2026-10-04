@@ -1,0 +1,11 @@
+# Add this override only after placing a paid OpenAI API key in secrets/openai_api_key.
+services:
+  gateway:
+    environment:
+      GATEWAY_OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+    secrets:
+      - openai_api_key
+
+secrets:
+  openai_api_key:
+    file: ./secrets/openai_api_key

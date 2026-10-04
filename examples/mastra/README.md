@@ -32,3 +32,15 @@ Inspect the user input for these markers. Each success stream needs standard Res
 All requests use `store:false`, a full input history and an explicitly selected Responses model. Set `providerOptions.openai.systemMessageMode` to `developer` so Mastra agent instructions use the role required by the subscription route.
 
 Client retries are disabled with both call-time `modelSettings.maxRetries: 0` and agent-level `errorProcessorDefaults: false`. Mastra's default error processors otherwise retry transient errors independently of model-call retries. The gateway itself never replays inference. Configure deliberate retries in your own app only after considering repeated model work and tool side effects.
+
+## Paid provider check
+
+The pinned OpenAI provider also calls the gateway's paid embeddings, speech and transcription endpoints. With the optional Platform API key configured, set `GATEWAY_BASE_URL` and `GATEWAY_API_KEY` as above and run:
+
+```fish
+rtk npm run smoke:paid
+```
+
+The script embeds a short test phrase, turns it into speech, then transcribes that generated audio. It prints only check names. Each successful live run makes three separately billed Platform API calls. Defaults are `text-embedding-3-small`, `gpt-4o-mini-tts` and `gpt-4o-mini-transcribe`; override them with `GATEWAY_EMBEDDING_MODEL`, `GATEWAY_SPEECH_MODEL` and `GATEWAY_TRANSCRIPTION_MODEL` when needed. The subscription `GET /v1/models` catalog does not list paid models.
+
+Offline CI runs the same script against controlled upstream fixtures with `TestPaidProviderContract`. Fixture success does not establish paid-account eligibility.

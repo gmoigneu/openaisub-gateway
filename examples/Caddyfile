@@ -1,6 +1,6 @@
 # Add this site to your existing Caddy configuration; replace the domain.
 gateway.example.com {
-	@inference path /v1/models /v1/responses
+	@inference path /v1/models /v1/responses /v1/embeddings /v1/audio/transcriptions /v1/audio/speech
 	handle @inference {
 		reverse_proxy openaisub-gateway:8080
 	}

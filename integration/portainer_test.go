@@ -45,6 +45,12 @@ func (f *portainerFixture) compose(args ...string) []byte {
 	return f.docker(append(flags, args...)...)
 }
 
+func (f *portainerFixture) composePaid(args ...string) []byte {
+	f.t.Helper()
+	flags := []string{"compose", "-p", f.name, "-f", filepath.Join(f.dir, "compose.portainer.yaml"), "-f", filepath.Join(f.dir, "compose.portainer.paid.yaml")}
+	return f.docker(append(flags, args...)...)
+}
+
 func (f *portainerFixture) request(method, endpoint, key, body string) (*http.Response, []byte) {
 	f.t.Helper()
 	req, err := http.NewRequestWithContext(f.ctx, method, endpoint, strings.NewReader(body))
@@ -186,6 +192,13 @@ func TestContainerPortainerPublicAuthentication(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.dir, "compose.portainer.yaml"), stack, 0600); err != nil {
 		t.Fatal(err)
 	}
+	paidStack, err := os.ReadFile(filepath.Join("..", "compose.portainer.paid.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, "compose.portainer.paid.yaml"), paidStack, 0600); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
 		defer stop()
@@ -217,6 +230,11 @@ func TestContainerPortainerPublicAuthentication(t *testing.T) {
 		{"invalid responses key", "POST", "/v1/responses", "invalid", `{}`, 401},
 		{"valid models key", "GET", "/v1/models", key, "", 503},
 		{"valid responses key", "POST", "/v1/responses", key, `{"model":"fixture","input":"fixture"}`, 503},
+		{"missing embeddings key", "POST", "/v1/embeddings", "", `{}`, 401},
+		{"invalid embeddings key", "POST", "/v1/embeddings", "invalid", `{}`, 401},
+		{"valid embeddings key without paid secret", "POST", "/v1/embeddings", key, `{}`, 503},
+		{"valid transcription key without paid secret", "POST", "/v1/audio/transcriptions", key, `{}`, 503},
+		{"valid speech key without paid secret", "POST", "/v1/audio/speech", key, `{}`, 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			subtest := *f
@@ -227,7 +245,7 @@ func TestContainerPortainerPublicAuthentication(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{"/", "/healthz", "/login", "/keys", "/revoke", "/disconnect", "/internal/identity", "/internal/import", "/internal/registration"} {
+	for _, path := range []string{"/", "/healthz", "/login", "/keys", "/revoke", "/disconnect", "/internal/identity", "/internal/import", "/internal/registration", "/v1/audio/translations", "/v1/realtime"} {
 		for _, credential := range []string{"", key} {
 			resp, _ := f.request(http.MethodGet, proxy+path, credential, "")
 			if resp.StatusCode != http.StatusNotFound {
@@ -254,9 +272,49 @@ func TestContainerPortainerPublicAuthentication(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	// The optional paid key is a read-only file, never a stack environment value.
+	if err := os.WriteFile(filepath.Join(secrets, "openai_api_key"), []byte("fixture-platform-key\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.docker("run", "--rm", "--user", "0", "--volume", secrets+":/bootstrap", "node:24-bookworm-slim", "sh", "-c", "chown 10001:10001 /bootstrap/openai_api_key && chmod 600 /bootstrap/openai_api_key")
+	f.composePaid("up", "-d", "--no-build", "--pull", "never", "--force-recreate")
+	base = f.adminBase()
+	f.wait(base+"/", http.StatusOK)
+	var mounts []struct {
+		Destination string
+		RW          bool
+	}
+	if json.Unmarshal(f.docker("inspect", "--format", "{{json .Mounts}}", f.name), &mounts) != nil {
+		t.Fatal("cannot inspect paid key mount")
+	}
+	paidMount := false
+	for _, mount := range mounts {
+		if mount.Destination == "/run/secrets/openai_api_key" {
+			paidMount = !mount.RW
+		}
+	}
+	if !paidMount {
+		t.Fatal("paid key mount is missing or writable")
+	}
+	env := string(f.docker("inspect", "--format", "{{json .Config.Env}}", f.name))
+	if strings.Contains(env, "fixture-platform-key") || !strings.Contains(env, "GATEWAY_OPENAI_API_KEY_FILE=/run/secrets/openai_api_key") {
+		t.Fatal("paid key leaked into environment or file path is missing")
+	}
+	// Wrong media type is rejected only after the paid key is loaded; no request reaches OpenAI.
+	probe, _ := http.NewRequestWithContext(f.ctx, http.MethodPost, proxy+"/v1/embeddings", strings.NewReader(`{}`))
+	probe.Header.Set("Authorization", "Bearer "+key)
+	probe.Header.Set("Content-Type", "text/plain")
+	paidResponse, err := f.client.Do(probe)
+	if err != nil {
+		t.Fatal("paid key probe failed")
+	}
+	paidResponse.Body.Close()
+	if paidResponse.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("paid key was not loaded from its private mount: HTTP %d", paidResponse.StatusCode)
+	}
 	csrf = f.login(base)
 	f.form(base, "/revoke", url.Values{"csrf": {csrf}, "id": {id}}, http.StatusSeeOther)
-	for _, endpoint := range []struct{ method, path, body string }{{"GET", "/v1/models", ""}, {"POST", "/v1/responses", `{}`}} {
+	for _, endpoint := range []struct{ method, path, body string }{{"GET", "/v1/models", ""}, {"POST", "/v1/responses", `{}`}, {"POST", "/v1/embeddings", `{}`}, {"POST", "/v1/audio/transcriptions", `{}`}, {"POST", "/v1/audio/speech", `{}`}} {
 		resp, _ := f.request(endpoint.method, proxy+endpoint.path, key, endpoint.body)
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("revoked key returned HTTP %d", resp.StatusCode)
