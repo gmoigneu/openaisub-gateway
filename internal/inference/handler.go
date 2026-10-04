@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -197,11 +198,22 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copyHeaders(w.Header(), resp.Header)
-	if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+	var bodyReader io.Reader = resp.Body
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if contentType == "" {
+		bodyReader, err = validatedEventStream(resp.Body)
+	} else {
+		var mediaType string
+		mediaType, _, err = mime.ParseMediaType(contentType)
+		if err == nil && mediaType != "text/event-stream" {
+			err = errors.New("unexpected content type")
+		}
+	}
+	if err != nil {
 		apiError(w, 502, "invalid_upstream_response", "OpenAI did not return an event stream.", "")
 		return
 	}
-	h.consume(w, r, resp.Body, stream)
+	h.consume(w, r, bodyReader, stream)
 }
 
 func copyHeaders(dst, src http.Header) {
