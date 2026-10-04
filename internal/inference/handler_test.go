@@ -326,6 +326,10 @@ func TestResponsesWithoutContentType(t *testing.T) {
 			{"unrelated event", "", "data: {\"type\":\"unrelated\"}\n\n" + completed, 502},
 			{"unfinished frame", "", strings.TrimSuffix(completed, "\n\n"), 502},
 			{"explicit json", "application/json", completed, 502},
+			{"lookalike content type", "text/event-streaming", completed, 502},
+			{"parameterized SSE", "text/event-stream; charset=utf-8", completed, 200},
+			{"missing terminal response", "", "data: {\"type\":\"response.completed\"}\n\n", 502},
+			{"mismatched terminal status", "", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"failed\"}}\n\n", 502},
 		} {
 			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
 				h := fixture(t, func(w http.ResponseWriter, r *http.Request) {

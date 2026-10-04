@@ -17,15 +17,9 @@ import (
 func validatedEventStream(body io.Reader) (io.Reader, error) {
 	var prefix bytes.Buffer
 	err := readEvents(io.TeeReader(io.LimitReader(body, maxEventBytes), &prefix), true, func(event string, data []byte, _ []string) (bool, error) {
-		var payload *struct {
-			Type string `json:"type"`
-		}
-		if json.Unmarshal(data, &payload) != nil || payload == nil {
-			return false, errors.New("invalid initial stream event")
-		}
-		typ := payload.Type
-		if typ == "" {
-			typ = event
+		_, typ, _, err := decodeEvent(event, data)
+		if err != nil {
+			return false, err
 		}
 		if typ != "error" && !strings.HasPrefix(typ, "response.") {
 			return false, errors.New("unexpected initial stream event")
@@ -38,6 +32,36 @@ func validatedEventStream(body io.Reader) (io.Reader, error) {
 	return io.MultiReader(bytes.NewReader(prefix.Bytes()), body), nil
 }
 
+func decodeEvent(event string, data []byte) (map[string]any, string, bool, error) {
+	if bytes.Equal(data, []byte("[DONE]")) {
+		return nil, "", false, errors.New("stream ended without terminal response")
+	}
+	var payload map[string]any
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if dec.Decode(&payload) != nil || payload == nil {
+		return nil, "", false, errors.New("invalid stream event")
+	}
+	if dec.Decode(new(any)) != io.EOF {
+		return nil, "", false, errors.New("trailing stream data")
+	}
+	typ, _ := payload["type"].(string)
+	if typ == "" {
+		typ = event
+	}
+	terminal := typ == "response.completed" || typ == "response.failed" || typ == "response.incomplete" || typ == "error"
+	if terminal && typ != "error" {
+		response, _ := payload["response"].(map[string]any)
+		if response == nil {
+			return nil, "", false, errors.New("terminal event missing response")
+		}
+		if response["status"] != strings.TrimPrefix(typ, "response.") {
+			return nil, "", false, errors.New("terminal response status mismatch")
+		}
+	}
+	return payload, typ, terminal, nil
+}
+
 func (h *Handler) consume(w http.ResponseWriter, r *http.Request, body io.Reader, stream bool) {
 	if stream {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -46,21 +70,9 @@ func (h *Handler) consume(w http.ResponseWriter, r *http.Request, body io.Reader
 		_ = http.NewResponseController(w).Flush()
 	}
 	err := readEvents(body, stream, func(event string, data []byte, fields []string) (bool, error) {
-		if bytes.Equal(data, []byte("[DONE]")) {
-			return false, errors.New("stream ended without terminal response")
-		}
-		var payload map[string]any
-		dec := json.NewDecoder(bytes.NewReader(data))
-		dec.UseNumber()
-		if dec.Decode(&payload) != nil || payload == nil {
-			return false, errors.New("invalid stream event")
-		}
-		if dec.Decode(new(any)) != io.EOF {
-			return false, errors.New("trailing stream data")
-		}
-		typ, _ := payload["type"].(string)
-		if typ == "" {
-			typ = event
+		payload, typ, terminal, err := decodeEvent(event, data)
+		if err != nil {
+			return false, err
 		}
 		if item, ok := payload["item"].(map[string]any); ok {
 			externalCall(item)
@@ -68,13 +80,6 @@ func (h *Handler) consume(w http.ResponseWriter, r *http.Request, body io.Reader
 		response, _ := payload["response"].(map[string]any)
 		if response != nil {
 			externalResponse(response)
-		}
-		terminal := typ == "response.completed" || typ == "response.failed" || typ == "response.incomplete" || typ == "error"
-		if terminal && typ != "error" && response == nil {
-			return false, errors.New("terminal event missing response")
-		}
-		if terminal && typ != "error" && response["status"] != strings.TrimPrefix(typ, "response.") {
-			return false, errors.New("terminal response status mismatch")
 		}
 		if stream {
 			encoded, _ := json.Marshal(payload)
