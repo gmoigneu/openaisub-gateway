@@ -1,0 +1,12 @@
+# Merge this override into the Portainer stack after creating the host secret file.
+services:
+  gateway:
+    environment:
+      GATEWAY_OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+    volumes:
+      - type: bind
+        source: ${GATEWAY_SECRETS_DIR:-/opt/openaisub-gateway/secrets}/openai_api_key
+        target: /run/secrets/openai_api_key
+        read_only: true
+        bind:
+          create_host_path: false

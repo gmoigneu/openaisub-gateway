@@ -35,7 +35,8 @@ func TestInferenceRejectsInvalidAndAmbiguousCredentials(t *testing.T) {
 		calls++
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	for _, route := range []struct{ method, path string }{{"GET", "/v1/models"}, {"POST", "/v1/responses"}} {
+	routes := []struct{ method, path string }{{"GET", "/v1/models"}, {"POST", "/v1/responses"}, {"POST", "/v1/embeddings"}, {"POST", "/v1/audio/transcriptions"}, {"POST", "/v1/audio/speech"}}
+	for _, route := range routes {
 		for _, auth := range [][]string{nil, {"Bearer wrong"}, {"Basic " + key}, {"Bearer "}, {"Bearer " + strings.Repeat("a", 43)}, {"Bearer " + key, "Bearer wrong"}, {"Bearer wrong", "Bearer " + key}, {"Bearer " + key, "Bearer " + key}, {"Bearer " + key + ", Bearer wrong"}} {
 			r := httptest.NewRequest(route.method, route.path, nil)
 			for _, value := range auth {
@@ -56,21 +57,28 @@ func TestInferenceRejectsInvalidAndAmbiguousCredentials(t *testing.T) {
 			t.Fatal("alternative credential location bypassed bearer authentication")
 		}
 	}
-	request := func() int {
-		r := httptest.NewRequest("POST", "/v1/responses", nil)
+	request := func(route struct{ method, path string }) int {
+		r := httptest.NewRequest(route.method, route.path, nil)
 		r.Header.Set("Authorization", "Bearer "+key)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		return w.Code
 	}
-	if request() != http.StatusNoContent || calls != 1 {
-		t.Fatal("valid key was rejected")
+	for _, route := range routes {
+		if request(route) != http.StatusNoContent {
+			t.Fatal("valid key was rejected")
+		}
+	}
+	if calls != len(routes) {
+		t.Fatal("valid requests missed the inference handler")
 	}
 	if err := s.RevokeKey(context.Background(), k.ID); err != nil {
 		t.Fatal(err)
 	}
-	if request() != http.StatusUnauthorized || calls != 1 {
-		t.Fatal("revoked key reached inference")
+	for _, route := range routes {
+		if request(route) != http.StatusUnauthorized || calls != len(routes) {
+			t.Fatal("revoked key reached inference")
+		}
 	}
 }
 
@@ -112,6 +120,44 @@ func TestUnauthenticatedSlowBodyHasReadDeadline(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatal("slow upload did not receive an auth rejection")
+	}
+}
+
+func TestPaidKeyFileAndInferenceRouteSplit(t *testing.T) {
+	t.Setenv("GATEWAY_OPENAI_API_KEY_FILE", "")
+	if key, err := paidAPIKey(); err != nil || key != "" {
+		t.Fatal("unconfigured paid key should leave subscription routes available")
+	}
+	path := filepath.Join(t.TempDir(), "openai_api_key")
+	if err := os.WriteFile(path, []byte("platform-test-key\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GATEWAY_OPENAI_API_KEY_FILE", path)
+	if key, err := paidAPIKey(); err != nil || key != "platform-test-key" {
+		t.Fatal("paid key file was not loaded")
+	}
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := paidAPIKey(); err == nil {
+		t.Fatal("empty paid key file was accepted")
+	}
+	if err := os.WriteFile(path, []byte("first\nsecond"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := paidAPIKey(); err == nil {
+		t.Fatal("multiline paid key file was accepted")
+	}
+	var subscription, platform int
+	routes := inferenceRoutes(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { subscription++ }), http.HandlerFunc(func(http.ResponseWriter, *http.Request) { platform++ }))
+	for _, path := range []string{"/v1/models", "/v1/responses"} {
+		routes.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", path, nil))
+	}
+	for _, path := range []string{"/v1/embeddings", "/v1/audio/transcriptions", "/v1/audio/speech"} {
+		routes.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", path, nil))
+	}
+	if subscription != 2 || platform != 3 {
+		t.Fatal("paid route crossed the subscription credential boundary")
 	}
 }
 

@@ -1,8 +1,8 @@
 # Paid embeddings and voice expansion
 
-Status: proposed, 2026-10-04. Governing issue: [#7](https://github.com/gmoigneu/openaisub-gateway/issues/7). Owner decisions: use a separately billed OpenAI API key; support embeddings, speech-to-text and text-to-speech; allow every valid gateway client key to call the paid endpoints.
+Status: approved, 2026-10-04; implementation in progress. Governing issue: [#7](https://github.com/gmoigneu/openaisub-gateway/issues/7). Owner decisions: use a separately billed OpenAI API key; support embeddings, speech-to-text and text-to-speech; allow every valid gateway client key to call the paid endpoints.
 
-This specification extends [v1](v1.md). The subscription sign-in, Models and Responses behavior in v1 remain in force. Its exclusion of embeddings applies only to the original subscription-only release. The accepted [subscription ADR](../adr/0001-subscription-responses.md) remains the decision for Responses. [ADR 0004](../adr/0004-separate-paid-api-credential.md) proposes the paid route architecture.
+This specification extends [v1](v1.md). The subscription sign-in, Models and Responses behavior in v1 remain in force. Its exclusion of embeddings applies only to the original subscription-only release. The accepted [subscription ADR](../adr/0001-subscription-responses.md) remains the decision for Responses. [ADR 0004](../adr/0004-separate-paid-api-credential.md) records the paid route architecture.
 
 ## Outcome and boundaries
 
@@ -35,7 +35,7 @@ The dashboard may show whether the paid key is configured, but must not reveal i
 ## Verification
 
 - Behavioral tests prove route and method allowlists, gateway-key authentication and revocation, credential separation, header stripping, no redirects or retries, missing-key errors, size limits, error and request-ID forwarding, and client cancellation.
-- Contract checks exercise the pinned Mastra/OpenAI provider against controlled embeddings, transcription and speech fixtures, including binary audio and relevant streaming modes. Fixtures are untrusted data and cannot prove paid-account eligibility.
+- Contract checks exercise the pinned Mastra/OpenAI provider against controlled embeddings, complete transcription and speech fixtures, including binary audio. HTTP behavior tests cover speech byte streaming and transcription SSE flushing and cancellation. The pinned provider's transcription `doStream` uses Realtime WebSocket, which is outside this change. Fixtures are untrusted data and cannot prove paid-account eligibility.
 - Container and Caddy checks prove the three routes are exposed only through the authenticated inference path, the paid secret is mounted read-only, and admin routes remain private.
 - Run the repository's Go race tests, vet, formatting, Mastra contract checks and relevant container checks. Independently review specification fidelity and security. Before claiming live paid support verified, the owner runs one real request for each endpoint with a configured paid key and records outcomes and model IDs without credentials or content.
 

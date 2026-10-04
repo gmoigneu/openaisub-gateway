@@ -26,6 +26,7 @@ import (
 	"github.com/gmoigneu/openaisub-gateway/internal/admin"
 	"github.com/gmoigneu/openaisub-gateway/internal/inference"
 	"github.com/gmoigneu/openaisub-gateway/internal/openaiauth"
+	"github.com/gmoigneu/openaisub-gateway/internal/paid"
 	"github.com/gmoigneu/openaisub-gateway/internal/store"
 	"golang.org/x/sys/unix"
 )
@@ -80,6 +81,20 @@ func adminSecret() (string, error) {
 	}
 	return v, nil
 }
+func paidAPIKey() (string, error) {
+	path := os.Getenv("GATEWAY_OPENAI_API_KEY_FILE")
+	if path == "" {
+		return "", nil
+	}
+	key, err := readSecret(path)
+	if err != nil {
+		return "", err
+	}
+	if key == "" || strings.ContainsAny(key, " \t\r\n") {
+		return "", errors.New("paid OpenAI API key file is empty or malformed")
+	}
+	return key, nil
+}
 func initialize(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	dir := fs.String("secrets-dir", "./secrets", "secret directory")
@@ -133,6 +148,10 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	platformKey, err := paidAPIKey()
+	if err != nil {
+		return err
+	}
 	encoded, err := readSecret(env("GATEWAY_ENCRYPTION_KEY_FILE", "/run/secrets/encryption_key"))
 	if err != nil {
 		return err
@@ -164,7 +183,7 @@ func serve() error {
 	}
 	manager := openaiauth.NewManager(s, nil)
 	handler := inference.New(manager, nil)
-	api := newAPIServer(env("GATEWAY_API_ADDR", ":8080"), apiHandler(s, handler))
+	api := newAPIServer(env("GATEWAY_API_ADDR", ":8080"), apiHandler(s, inferenceRoutes(handler, paid.New(platformKey, nil))))
 	owner := &http.Server{Addr: env("GATEWAY_ADMIN_ADDR", ":8081"), Handler: admin.New(s, manager, secret), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(io.Discard, "", 0)}
 	apiListener, err := net.Listen("tcp", api.Addr)
 	if err != nil {
@@ -200,6 +219,17 @@ func serve() error {
 		return errors.New("gateway listener failed")
 	}
 	return nil
+}
+
+func inferenceRoutes(subscription, platform http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/embeddings", "/v1/audio/transcriptions", "/v1/audio/speech":
+			platform.ServeHTTP(w, r)
+		default:
+			subscription.ServeHTTP(w, r)
+		}
+	})
 }
 
 func newAPIServer(addr string, handler http.Handler) *http.Server {

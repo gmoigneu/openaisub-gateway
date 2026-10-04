@@ -1,6 +1,6 @@
 # Separate paid API credential for embeddings and voice
 
-Status: proposed, 2026-10-04. Governing issue: [#7](https://github.com/gmoigneu/openaisub-gateway/issues/7).
+Status: accepted, 2026-10-04. Governing issue: [#7](https://github.com/gmoigneu/openaisub-gateway/issues/7).
 
 ## Context
 
