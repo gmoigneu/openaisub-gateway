@@ -1,0 +1,58 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: examples/mastra/package-lock.json
+      - name: Install contract dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: examples/mastra
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Check reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Behavioral and Mastra contract tests
+        run: go test -race ./...
+        env:
+          MASTRA_CONTRACT: '1'
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build native container for onboarding check
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          tags: openaisub-gateway:local
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify container onboarding and restart
+        run: go test -v ./integration -run TestContainer
+        env:
+          DOCKER_CONTRACT: '1'
+      - name: Verify both container architectures
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

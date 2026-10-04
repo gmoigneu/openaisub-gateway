@@ -1,0 +1,12 @@
+{
+  "name": "openaisub-gateway-mastra-contract",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": { "smoke": "node smoke.mjs" },
+  "dependencies": {
+    "@ai-sdk/openai": "4.0.83",
+    "@mastra/core": "1.74.0",
+    "zod": "4.6.5"
+  }
+}

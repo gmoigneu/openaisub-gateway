@@ -1,0 +1,13 @@
+.git
+.roam
+.DS_Store
+node_modules
+**/node_modules
+secrets
+data
+.env
+gateway
+bin
+*.db
+*.db-shm
+*.db-wal

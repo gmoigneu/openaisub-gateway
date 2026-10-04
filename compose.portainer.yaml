@@ -1,0 +1,49 @@
+# Docker Standalone stack behind an existing Caddy container. See docs/portainer.md.
+services:
+  gateway:
+    image: ${GATEWAY_IMAGE:-openaisub-gateway:public-preview}
+    container_name: ${GATEWAY_CONTAINER_NAME:-openaisub-gateway}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${GATEWAY_ADMIN_PORT:-8081}:8081"
+    expose:
+      - "8080"
+    environment:
+      GATEWAY_DATA_DIR: /data
+      GATEWAY_API_ADDR: :8080
+      GATEWAY_ADMIN_ADDR: :8081
+      GATEWAY_ADMIN_SECRET_FILE: /run/secrets/admin_secret
+      GATEWAY_ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+    volumes:
+      - gateway-data:/data
+      - type: bind
+        source: ${GATEWAY_SECRETS_DIR:-/opt/openaisub-gateway/secrets}/admin_secret
+        target: /run/secrets/admin_secret
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${GATEWAY_SECRETS_DIR:-/opt/openaisub-gateway/secrets}/encryption_key
+        target: /run/secrets/encryption_key
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      caddy:
+        aliases:
+          - openaisub-gateway
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  gateway-data:
+    name: ${GATEWAY_DATA_VOLUME:-openaisub-gateway-data}
+
+networks:
+  caddy:
+    external: true
+    name: ${GATEWAY_PROXY_NETWORK:-caddy}
