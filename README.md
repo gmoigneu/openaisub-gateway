@@ -1,21 +1,27 @@
 # OpenAI subscription gateway
 
-A private Go gateway for one owner's Mastra agents. It exposes OpenAI Responses and Models endpoints using the owner's Sign in with ChatGPT credentials. Each app gets a separate revocable gateway key.
+A Go gateway for one owner's Mastra agents. It exposes OpenAI Responses and Models endpoints using the owner's Sign in with ChatGPT credentials. Each app gets a separate revocable gateway key.
 
 **Implementation preview. Live OpenAI sign-in and a subscription-backed Mastra tool round trip still need owner verification.** Fixture tests cannot prove account eligibility or preview availability. The project uses OpenAI's documented open-source sign-in flow, not Codex device credentials.
 
 ## Scope
 
 - One owner, one connected OpenAI account, one gateway process.
-- Private Docker network, optional localhost API port for testing, separate localhost dashboard, persistent encrypted credentials.
+- Private Docker network by default, optional localhost API port for testing, or public inference behind an existing HTTPS proxy. The dashboard stays on localhost; credentials stay encrypted in persistent storage.
 - Streaming and complete Responses, function tools, structured JSON, live model discovery.
 - No Chat Completions, embeddings, token accounting, request-content storage or billing fallback.
 
 See the [canonical specification](docs/specs/v1.md) and [architecture decisions](docs/adr/).
 
+## Deploy with Portainer and Caddy
+
+Follow the [Portainer deployment guide](docs/portainer.md) to run the gateway independently behind your existing Caddy HTTPS proxy. Use [compose.portainer.yaml](compose.portainer.yaml) for Docker Standalone and [examples/Caddyfile](examples/Caddyfile) for the public route. The project does not run another proxy or manage certificates.
+
+Only Models and Responses are public, and both require a valid gateway client key. Administration stays on host loopback through SSH. Public clients use `https://your-gateway-domain/v1` as their `baseURL`. The guide covers the image build, secrets, OpenAI login, keys, checks and updates.
+
 ## How it works
 
-Mastra sends a gateway client key to the private API. The gateway checks that key, obtains a current OpenAI bearer token, and forwards the request to the official OpenAI API. OpenAI credentials stay in the gateway. Mastra supplies conversation history and executes tools.
+Mastra sends a gateway client key to the API. The gateway checks that key, obtains a current OpenAI bearer token, and forwards the request to the official OpenAI API. OpenAI credentials stay in the gateway. Mastra supplies conversation history and executes tools.
 
 One Go process serves the API and dashboard on separate listeners. SQLite stores client key hashes and encrypted OpenAI credentials in a Docker volume. The encryption key is a separate Docker secret. The gateway discovers models from OpenAI and refreshes credentials when needed.
 
@@ -164,11 +170,11 @@ The [executable Mastra example](examples/mastra/) pins `@mastra/core` 1.74.0, `@
 
 ## API and configuration
 
-Clients send `Authorization: Bearer <gateway-client-key>` to `http://gateway:8080`, or to `http://127.0.0.1:8080` when host access is enabled. Use a key created in the dashboard, not the administrator password or an OpenAI token.
+Clients send `Authorization: Bearer <gateway-client-key>` to `http://gateway:8080`, to `http://127.0.0.1:8080` when host access is enabled, or to the public HTTPS domain in the [Portainer setup](docs/portainer.md). Use a key created in the dashboard, not the administrator password or an OpenAI token.
 
 - `GET /v1/models` returns the connected account's models in OpenAI-compatible `data[].id` format. Results are cached briefly; there is no bundled model list.
 - `POST /v1/responses` accepts complete or streaming inference requests. Set `stream:true` for server-sent events. Clients must send the full conversation history on each request.
-- `GET /healthz` returns `ok` without authentication. It checks that the process responds, not that OpenAI is connected or available.
+- `GET /healthz` returns `ok` without authentication on the private listener. The supplied Caddy route returns 404 for this path publicly. It checks that the process responds, not that OpenAI is connected or available.
 
 The shipped Compose configuration sets these variables. Defaults work for the supplied container:
 
@@ -178,7 +184,7 @@ The shipped Compose configuration sets these variables. Defaults work for the su
 - `GATEWAY_ADMIN_SECRET_FILE`: `/run/secrets/admin_secret`, the administrator password file.
 - `GATEWAY_ENCRYPTION_KEY_FILE`: `/run/secrets/encryption_key`, the credential encryption key file.
 
-Keep the API private and preserve the separate admin listener when changing addresses. The administrator password cannot authenticate inference requests; client keys cannot access the dashboard.
+Expose public inference only through the [documented HTTPS proxy route](docs/portainer.md); keep the dashboard on host loopback. The administrator password cannot authenticate inference requests; client keys cannot access the dashboard.
 
 `GATEWAY_HOST_PORT` is a Compose setting for `compose.host.yaml`, not a gateway process variable. It defaults to 8080 and does not affect the internal API or administrator port.
 
@@ -250,7 +256,7 @@ The `gateway-data` named volume holds SQLite state, client key hashes, registrat
 - A reconnect warning requires signing in again. A temporary upstream failure does not require deleting state.
 - Disconnect removes local credentials and attempts remote revocation. An unconfirmed revocation means you should also remove access in your OpenAI account.
 
-Do not run multiple gateway processes against the same volume. Do not expose either listener publicly. Local root, Docker administrators and processes that can read the encryption key and database are trusted.
+Do not run multiple gateway processes against the same volume. Do not publish either listener directly to the internet. The public setup routes only inference through the existing HTTPS proxy. Local root, Docker administrators, containers on the shared proxy network, and processes that can read the encryption key and database are trusted. The Portainer stack uses the separate named volume `openaisub-gateway-data`; it does not automatically import an existing private Compose deployment.
 
 ## Develop and verify
 
