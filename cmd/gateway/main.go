@@ -1,4 +1,4 @@
-// Gateway runs private inference and owner administration, or local sign-in setup.
+// Gateway runs authenticated inference and private administration, or local sign-in setup.
 package main
 
 import (
@@ -164,7 +164,7 @@ func serve() error {
 	}
 	manager := openaiauth.NewManager(s, nil)
 	handler := inference.New(manager, nil)
-	api := &http.Server{Addr: env("GATEWAY_API_ADDR", ":8080"), Handler: apiHandler(s, handler), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10, ErrorLog: log.New(io.Discard, "", 0)}
+	api := newAPIServer(env("GATEWAY_API_ADDR", ":8080"), apiHandler(s, handler))
 	owner := &http.Server{Addr: env("GATEWAY_ADMIN_ADDR", ":8081"), Handler: admin.New(s, manager, secret), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10, ErrorLog: log.New(io.Discard, "", 0)}
 	apiListener, err := net.Listen("tcp", api.Addr)
 	if err != nil {
@@ -201,6 +201,13 @@ func serve() error {
 	}
 	return nil
 }
+
+func newAPIServer(addr string, handler http.Handler) *http.Server {
+	// Bound unread bodies even when authentication rejects a request before inference.
+	// ReadTimeout limits uploads, not the lifetime of a streamed response.
+	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10, ErrorLog: log.New(io.Discard, "", 0)}
+}
+
 func apiHandler(s *store.Store, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" && r.Method == http.MethodGet {
@@ -209,7 +216,8 @@ func apiHandler(s *store.Store, next http.Handler) http.Handler {
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || !s.Authenticate(r.Context(), strings.TrimPrefix(auth, "Bearer ")) {
+		if len(r.Header.Values("Authorization")) != 1 || !strings.HasPrefix(auth, "Bearer ") || !s.Authenticate(r.Context(), strings.TrimPrefix(auth, "Bearer ")) {
+			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(401)
 			_, _ = io.WriteString(w, `{"error":{"message":"Invalid gateway API key","type":"authentication_error","code":"invalid_api_key"}}`)
@@ -290,33 +298,36 @@ func loginCommand(args []string) error {
 	fs := flag.NewFlagSet("auth login", flag.ContinueOnError)
 	sshHost := fs.String("ssh", "", "SSH destination for remote Docker")
 	dir := fs.String("directory", ".", "Compose project directory")
+	container := fs.String("container", "", "running Docker container name or ID instead of Compose")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected login argument")
 	}
-	if *sshHost != "" && (!filepath.IsAbs(*dir) || strings.HasPrefix(*sshHost, "-") || strings.ContainsAny(*sshHost, "\r\n")) {
-		return errors.New("remote login requires an SSH host and an absolute Compose directory")
+	directorySet := false
+	containerSet := false
+	fs.Visit(func(f *flag.Flag) {
+		directorySet = directorySet || f.Name == "directory"
+		containerSet = containerSet || f.Name == "container"
+	})
+	if containerSet && (!containerName.MatchString(*container) || directorySet) {
+		return errors.New("--container requires a Docker name or ID and cannot be combined with --directory")
+	}
+	if *sshHost != "" && (strings.HasPrefix(*sshHost, "-") || strings.ContainsAny(*sshHost, "\r\n") || (*container == "" && !filepath.IsAbs(*dir))) {
+		return errors.New("remote login requires an SSH host and either --container or an absolute Compose directory")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	transfer := func(action string, input []byte) ([]byte, error) {
-		var cmd *exec.Cmd
-		if *sshHost != "" {
-			command := "cd " + shellQuote(*dir) + " && docker compose exec -T gateway /gateway auth " + action
-			cmd = exec.CommandContext(ctx, "ssh", "--", *sshHost, command)
-		} else {
-			cmd = exec.CommandContext(ctx, "docker", "compose", "exec", "-T", "gateway", "/gateway", "auth", action)
-			cmd.Dir = *dir
-		}
+		cmd := loginTransferCommand(ctx, *sshHost, *dir, *container, action)
 		cmd.Stdin = bytes.NewReader(input)
 		cmd.Stderr = os.Stderr
 		return cmd.Output()
 	}
 	b, err := transfer("identity", nil)
 	if err != nil {
-		return errors.New("cannot read gateway identity; check Docker, SSH and the Compose directory")
+		return errors.New("cannot read gateway identity; check Docker, SSH and the container or Compose directory")
 	}
 	var identity struct {
 		HostID   string `json:"host_id"`
