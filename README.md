@@ -34,10 +34,10 @@ git clone https://github.com/gmoigneu/openaisub-gateway.git
 cd openaisub-gateway
 ```
 
-During the implementation preview, the code is on `feat/1-subscription-gateway`. Check out that branch before building:
+The implementation preview is on `main`. Use that branch before building:
 
 ```fish
-git switch feat/1-subscription-gateway
+git switch main
 ```
 
 Build and initialize the two secret files. Initialization does not overwrite existing secrets. The initializer runs as root only to set file ownership for the container's unprivileged UID 10001.

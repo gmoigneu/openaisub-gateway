@@ -20,7 +20,7 @@ Commands use the `rtk` command proxy and are compatible with fish. Replace the s
 Run the following on the **actual Docker host selected in Portainer**, not on the Portainer server if it manages another host. No gateway registry image is published. Build the preview image locally:
 
 ```fish
-rtk git clone --branch feat/1-subscription-gateway https://github.com/gmoigneu/openaisub-gateway.git
+rtk git clone --branch main https://github.com/gmoigneu/openaisub-gateway.git
 rtk proxy docker build -t openaisub-gateway:public-preview ./openaisub-gateway
 ```
 
