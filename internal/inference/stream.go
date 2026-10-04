@@ -12,6 +12,32 @@ import (
 	"strings"
 )
 
+// Some upstream responses omit Content-Type. Validate one bounded frame before
+// sending SSE headers, then replay every byte read ahead by the scanner.
+func validatedEventStream(body io.Reader) (io.Reader, error) {
+	var prefix bytes.Buffer
+	err := readEvents(io.TeeReader(io.LimitReader(body, maxEventBytes), &prefix), true, func(event string, data []byte, _ []string) (bool, error) {
+		var payload *struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &payload) != nil || payload == nil {
+			return false, errors.New("invalid initial stream event")
+		}
+		typ := payload.Type
+		if typ == "" {
+			typ = event
+		}
+		if typ != "error" && !strings.HasPrefix(typ, "response.") {
+			return false, errors.New("unexpected initial stream event")
+		}
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return io.MultiReader(bytes.NewReader(prefix.Bytes()), body), nil
+}
+
 func (h *Handler) consume(w http.ResponseWriter, r *http.Request, body io.Reader, stream bool) {
 	if stream {
 		w.Header().Set("Content-Type", "text/event-stream")

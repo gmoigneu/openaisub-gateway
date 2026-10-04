@@ -201,40 +201,47 @@ func TestSSEMultilineAndOutputToolConversion(t *testing.T) {
 }
 
 func TestStreamingFlushAndCancellation(t *testing.T) {
-	cancelled := make(chan struct{})
-	release := make(chan struct{})
-	h := fixture(t, func(w http.ResponseWriter, r *http.Request) {
-		defer close(cancelled)
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"type\":\"response.created\"}\n\n")
-		w.(http.Flusher).Flush()
-		select {
-		case <-r.Context().Done():
-		case <-release:
-		}
-	})
-	server := httptest.NewServer(h)
-	defer server.Close()
-	defer close(release)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/responses", strings.NewReader(`{"model":"m","input":"x","stream":true}`))
-	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	buffer := make([]byte, 256)
-	n, err := resp.Body.Read(buffer)
-	if err != nil || !strings.Contains(string(buffer[:n]), "response.created") {
-		t.Fatalf("event did not flush: %q %v", buffer[:n], err)
-	}
-	cancel()
-	select {
-	case <-cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("upstream did not receive cancellation")
+	for _, contentType := range []string{"text/event-stream", ""} {
+		t.Run("content-type="+contentType, func(t *testing.T) {
+			cancelled := make(chan struct{})
+			release := make(chan struct{})
+			h := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+				defer close(cancelled)
+				w.Header()["Content-Type"] = nil
+				if contentType != "" {
+					w.Header().Set("Content-Type", contentType)
+				}
+				fmt.Fprint(w, "data: {\"type\":\"response.created\"}\n\n")
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+			})
+			server := httptest.NewServer(h)
+			defer server.Close()
+			defer close(release)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/v1/responses", strings.NewReader(`{"model":"m","input":"x","stream":true}`))
+			client := &http.Client{Timeout: time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			buffer := make([]byte, 256)
+			n, err := resp.Body.Read(buffer)
+			if err != nil || !strings.Contains(string(buffer[:n]), "response.created") {
+				t.Fatalf("event did not flush: %q %v", buffer[:n], err)
+			}
+			cancel()
+			select {
+			case <-cancelled:
+			case <-time.After(time.Second):
+				t.Fatal("upstream did not receive cancellation")
+			}
+		})
 	}
 }
 
@@ -301,6 +308,61 @@ func TestMalformedSuccessNeverBecomesCompletion(t *testing.T) {
 		if w.Code != 502 {
 			t.Fatalf("accepted malformed terminal: %d %s", w.Code, w.Body)
 		}
+	}
+}
+
+func TestResponsesWithoutContentType(t *testing.T) {
+	completed := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r-1\",\"status\":\"completed\",\"output\":[]}}\n\n"
+	for _, stream := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, contentType, body string
+			status                  int
+		}{
+			{"completed", "", completed, 200},
+			{"comments and data only", "", ": keepalive\n\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n" + completed, 200},
+			{"html", "", "<!doctype html><html>upstream failure</html>", 502},
+			{"json", "", `{"type":"response.completed","response":{"status":"completed"}}`, 502},
+			{"malformed data", "", "event: response.created\ndata: not-json\n\n" + completed, 502},
+			{"unrelated event", "", "data: {\"type\":\"unrelated\"}\n\n" + completed, 502},
+			{"unfinished frame", "", strings.TrimSuffix(completed, "\n\n"), 502},
+			{"explicit json", "application/json", completed, 502},
+		} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
+				h := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+					// Suppress Go's automatic Content-Type to reproduce the live response.
+					w.Header()["Content-Type"] = nil
+					if tc.contentType != "" {
+						w.Header().Set("Content-Type", tc.contentType)
+					}
+					fmt.Fprint(w, tc.body)
+				})
+				w := call(h, fmt.Sprintf(`{"model":"m","input":"x","stream":%t}`, stream))
+				if w.Code != tc.status {
+					t.Fatalf("HTTP %d, want %d", w.Code, tc.status)
+				}
+				if tc.status == 200 {
+					if !strings.Contains(w.Body.String(), `"status":"completed"`) {
+						t.Fatal("terminal response lost")
+					}
+					if stream && !strings.HasPrefix(w.Header().Get("Content-Type"), "text/event-stream") {
+						t.Fatal("client stream lacks content type")
+					}
+				} else if !strings.Contains(w.Body.String(), `"code":"invalid_upstream_response"`) {
+					t.Fatal("invalid body was accepted as an event stream")
+				}
+			})
+		}
+	}
+}
+
+func TestUnlabelledStreamValidationIsBounded(t *testing.T) {
+	// Endless keepalives must not grow the replay buffer without limit.
+	reader := &io.LimitedReader{R: &repeatReader{value: []byte(": keepalive\n\n")}, N: maxEventBytes + 1}
+	if _, err := validatedEventStream(reader); err == nil {
+		t.Fatal("accepted stream without a Responses event")
+	}
+	if reader.N < 1 {
+		t.Fatal("read beyond the first-event validation limit")
 	}
 }
 
